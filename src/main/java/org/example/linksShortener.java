@@ -17,12 +17,76 @@ public class linksShortener {
 
     private static final String DATA_FILE = "user_data.json";
     private static final long MAX_EXPIRY_TIME_MS = TimeUnit.DAYS.toMillis(1);   // 24ч по умолчанию
+    private static final int DEFAULT_LIMIT_REDIRECT = 5;
     private final Gson gson = new Gson();
     private String currentUserUuid;
 
     public linksShortener() {
         loadData(); // Загрузка данных из файла при запуске
         removeExpiredLinks(); // Удаление устаревших ссылок при запуске
+    }
+
+    /**
+     * Внутренние классы для хранения информации о ссылке
+     */
+    class UserData {
+        private final String uuid;
+        private final Map<String, LinkData> links;
+
+        public UserData(String uuid, Map<String, LinkData> links) {
+            this.uuid = uuid;
+            this.links = links;
+        }
+
+        public String getUuid() {
+            return uuid;
+        }
+
+        public Map<String, LinkData> getLinks() {
+            return links;
+        }
+    }
+
+    class LinkData {
+        private final String longUrl;
+        private final long expiryTime;
+        private int visitLimit;
+
+        public LinkData(String longUrl, long expiryTime, int visitLimit) {
+            this.longUrl = longUrl;
+            this.expiryTime = expiryTime;
+            this.visitLimit = visitLimit;
+        }
+
+        public String getLongUrl() {
+            return longUrl;
+        }
+
+        public long getExpiryTime() {
+            return expiryTime;
+        }
+
+        public int getVisitLimit() {
+            return visitLimit;
+        }
+
+        public void decrementVisitLimit() {
+            this.visitLimit--;
+        }
+
+        public boolean isLimitReached() {
+            return visitLimit == 0;
+        }
+    }
+
+    /**
+     * Позволяет получить данные текущего пользователя.
+     */
+    private UserData getCurrentUser() {
+        return users.values().stream()
+                .filter(user -> user.getUuid().equals(currentUserUuid))
+                .findFirst()
+                .orElseThrow(() -> new IllegalStateException("Пользователь не найден!"));
     }
 
     /**
@@ -50,6 +114,71 @@ public class linksShortener {
         } catch (IOException e) {
             System.err.println("Ошибка при сохранении данных: " + e.getMessage());
         }
+    }
+
+    /**
+     * Проверяет доступность URL.
+     */
+    public boolean isUrlAccessible(String urlString) {
+        try {
+            URL url = new URL(urlString);
+            HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+            connection.setRequestMethod("HEAD");
+            connection.setConnectTimeout(5000); // Таймаут 5 секунд
+            connection.setReadTimeout(5000);
+            connection.connect();
+
+            int responseCode = connection.getResponseCode();
+            return responseCode >= 200 && responseCode < 400; // Проверка на успешные коды
+        } catch (Exception e) {
+            return false; // Если произошла ошибка, считаем, что URL недоступен
+        }
+    }
+
+    /**
+     * Удаляет просроченные ссылки с указанием исходной ссылки в сообщении.
+     */
+    public void removeExpiredLinks() {
+        long currentTime = System.currentTimeMillis();
+        users.forEach((username, user) -> {
+            Iterator<Map.Entry<String, LinkData>> iterator = user.getLinks().entrySet().iterator();
+            while (iterator.hasNext()) {
+                Map.Entry<String, LinkData> entry = iterator.next();
+                LinkData link = entry.getValue();
+                if (link.getExpiryTime() <= currentTime) {
+                    System.out.println("Срок действия ссылки " + entry.getKey() + " (" + link.getLongUrl() + ") истёк. Пользователь " + username);
+                    iterator.remove();
+                } else if (link.isLimitReached()) {
+                    System.out.println("Лимит переходов по ссылке " + entry.getKey() + " (" + link.getLongUrl() + ") исчерпан. Пользователь " + username);
+                    iterator.remove();
+                }
+            }
+        });
+        saveData();
+    }
+
+    /**
+     * Позволяет парсить время действия ссылки в мультиформатном виде для 1h, 1d, 1m.
+     */
+    private long parseDuration(String input) {
+        long totalMs = 0;
+        String[] parts = input.split(" ");
+        for (String part : parts) {
+            try {
+                if (part.endsWith("d")) {
+                    totalMs += TimeUnit.DAYS.toMillis(Long.parseLong(part.replace("d", "")));
+                } else if (part.endsWith("h")) {
+                    totalMs += TimeUnit.HOURS.toMillis(Long.parseLong(part.replace("h", "")));
+                } else if (part.endsWith("m")) {
+                    totalMs += TimeUnit.MINUTES.toMillis(Long.parseLong(part.replace("m", "")));
+                } else {
+                    System.out.println("Неверный формат времени: " + part + ". Укажите значение, например, 1d 2h 30m.");
+                }
+            } catch (NumberFormatException e) {
+                System.out.println("Ошибка парсинга: " + part);
+            }
+        }
+        return totalMs;
     }
 
     /**
@@ -92,7 +221,7 @@ public class linksShortener {
         String longUrl;
         while (true) {
             System.out.println("Введите исходный URL ('exit' - для перехода в меню):");
-            longUrl = scanner.nextLine();
+            longUrl = scanner.nextLine().trim();
 
             if ("exit".equalsIgnoreCase(longUrl)) {
                 System.out.println("Переход в меню.");
@@ -123,7 +252,32 @@ public class linksShortener {
         // Ограничение времени действия до максимального
         if (durationMs > MAX_EXPIRY_TIME_MS) {
             durationMs = MAX_EXPIRY_TIME_MS;
-            System.out.println("Внимание: Максимальное время действия ссылки – 24 часа (установлено автоматически).");
+            System.out.println("Внимание: Максимальное время действия ссылки – " + formatRemainingTime(System.currentTimeMillis() + MAX_EXPIRY_TIME_MS) + " (установлено автоматически).");
+        }
+
+        int visitLimit;
+        while (true) {
+            System.out.println("Введите число переходов по ссылке ('exit' - для перехода в меню):");
+            String limitInput = scanner.nextLine();
+
+            if ("exit".equalsIgnoreCase(durationInput)) {
+                System.out.println("Переход в меню.");
+                return;
+            }
+
+            try {
+                visitLimit = Integer.parseInt(limitInput);
+
+                // Проверка на лимит по умолчанию
+                if (visitLimit < DEFAULT_LIMIT_REDIRECT) {
+                    System.out.println("Указанный лимит переходов меньше значения по умолчанию - " + DEFAULT_LIMIT_REDIRECT + " (установлено автоматически).");
+                    visitLimit = DEFAULT_LIMIT_REDIRECT;
+                }
+
+                break;
+            } catch (NumberFormatException e) {
+                System.out.println("Некорректный ввод. Введите положительное число.");
+            }
         }
 
         // Создание короткой ссылки
@@ -131,7 +285,7 @@ public class linksShortener {
         String shortUrl = BASE_URL + uniqueId;
 
         UserData currentUser = getCurrentUser();
-        currentUser.getLinks().put(shortUrl, new LinkData(longUrl, System.currentTimeMillis() + durationMs));
+        currentUser.getLinks().put(shortUrl, new LinkData(longUrl, System.currentTimeMillis() + durationMs, visitLimit));
 
         saveData();
         System.out.println("Короткая ссылка: " + shortUrl);
@@ -164,46 +318,28 @@ public class linksShortener {
                     .orElse(null);
 
             if (link != null) {
-                long currentTime = System.currentTimeMillis();
-                if (currentTime <= link.getExpiryTime()) {
-                    try {
-                        Desktop.getDesktop().browse(new URI(link.getLongUrl()));
-                        System.out.println("Перенаправление на: " + link.getLongUrl());
-                    } catch (Exception e) {
-                        System.err.println("Ошибка при открытии URL: " + e.getMessage());
-                    }
-                } else {
+                if (link.getExpiryTime() <= System.currentTimeMillis()) {
                     System.out.println("Срок действия ссылки истёк. Исходная ссылка: " + link.getLongUrl());
+                    return;
+                }
+
+                if (link.isLimitReached()) {
+                    System.out.println("Лимит переходов по ссылке исчерпан. Исходная ссылка: " + link.getLongUrl());
+                    return;
+                }
+
+                try {
+                    Desktop.getDesktop().browse(new URI(link.getLongUrl()));
+                    link.decrementVisitLimit();  // Увеличиваем счетчик переходов
+                    saveData();
+                    System.out.println("Перенаправление на: " + link.getLongUrl());
+                } catch (Exception e) {
+                    System.err.println("Ошибка при открытии URL: " + e.getMessage());
                 }
                 return;
             }
 
             System.out.println("Короткая ссылка не найдена. Попробуйте снова.");
-        }
-    }
-
-    /**
-     * Удаляет ссылку, если запрос отправил её создатель.
-     */
-    public void deleteUrl(Scanner scanner) {
-        removeExpiredLinks();    // Удаление устаревших ссылок
-        UserData currentUser = getCurrentUser();
-
-        while (true) {
-            System.out.println("Введите короткую ссылку для удаления ('exit' - для перехода в меню):");
-            String shortUrl = scanner.nextLine();
-
-            if ("exit".equalsIgnoreCase(shortUrl)) {
-                System.out.println("Переход в меню.");
-                return;
-            }
-
-            if (currentUser.getLinks().remove(shortUrl) != null) {
-                saveData();
-                System.out.println("Ссылка удалена.");
-            } else {
-                System.out.println("Ссылка не существует или вы не являетесь её владельцем.");
-            }
         }
     }
 
@@ -227,7 +363,7 @@ public class linksShortener {
                         String shortUrl = entry.getKey();
                         LinkData linkData = entry.getValue();
                         String remainingTime = formatRemainingTime(linkData.getExpiryTime());
-                        System.out.println(shortUrl + " - " + linkData.getLongUrl() + " (" + remainingTime + ")");
+                        System.out.println(shortUrl + " - " + linkData.getLongUrl() + " (" + remainingTime + ", " + linkData.getVisitLimit() + " redirects left)");
                     });
         }
     }
@@ -267,7 +403,7 @@ public class linksShortener {
         String shortUrl;
         while (true) {
             System.out.println("Введите короткую ссылку для редактирования ('exit' - для перехода в меню):");
-            shortUrl = scanner.nextLine();
+            shortUrl = scanner.nextLine().trim();
             if ("exit".equalsIgnoreCase(shortUrl)) {
                 System.out.println("Переход в меню.");
                 return;
@@ -290,7 +426,7 @@ public class linksShortener {
         while (true) {
             System.out.println("Текущая ссылка: " + currentLink.getLongUrl());
             System.out.println("Введите новый URL (нажмите Enter, чтобы оставить текущий или введите 'exit' - для перехода в меню):");
-            newLongUrl = scanner.nextLine();
+            newLongUrl = scanner.nextLine().trim();
             if ("exit".equalsIgnoreCase(newLongUrl)) {
                 System.out.println("Переход в меню.");
                 return;
@@ -330,7 +466,7 @@ public class linksShortener {
             newExpiryTimeMs = parseDuration(newDurationInput);
             if (newExpiryTimeMs > 0) {
                 if (newExpiryTimeMs > MAX_EXPIRY_TIME_MS) {
-                    System.out.println("Указанное время превышает максимальное значение в 24 часа и будет ограничено автоматически.");
+                    System.out.println("Указанное время превышает максимальное значение в " + formatRemainingTime(System.currentTimeMillis() + MAX_EXPIRY_TIME_MS) + " и будет ограничено автоматически.");
                     newExpiryTimeMs = MAX_EXPIRY_TIME_MS;
                 }
                 newExpiryTimeMs += System.currentTimeMillis(); // Установка нового времени истечения
@@ -344,81 +480,65 @@ public class linksShortener {
             return;
         }
 
-        currentUser.getLinks().put(shortUrl, new LinkData(newLongUrl, newExpiryTimeMs));
+        String newVisitLimitInput;
+        int newVisitLimit;
+        while (true) {
+            System.out.println("Текущий лимит переходов: " + currentLink.getVisitLimit());
+            System.out.println("Введите новый лимит переходов (нажмите Enter, чтобы оставить текущий лимит, 'exit' - для перехода в меню):");
+            newVisitLimitInput = scanner.nextLine();
+            if ("exit".equalsIgnoreCase(newVisitLimitInput)) {
+                System.out.println("Переход в меню.");
+                return;
+            }
+
+            // Оставить текущий лимит
+            if (newVisitLimitInput.isEmpty()) {
+                newVisitLimit = currentLink.getVisitLimit();
+                break;
+            }
+
+            try {
+                newVisitLimit = Integer.parseInt(newVisitLimitInput);
+                if (newVisitLimit < DEFAULT_LIMIT_REDIRECT) {
+                    System.out.println("Указанный лимит переходов меньше значения по умолчанию - " + DEFAULT_LIMIT_REDIRECT + " (установлено автоматически).");
+                    continue;
+                }
+                break;
+            } catch (NumberFormatException e) {
+                System.out.println("Некорректное значение. Пожалуйста, введите целое число.");
+            }
+        }
+
+        currentUser.getLinks().put(shortUrl, new LinkData(newLongUrl, newExpiryTimeMs, newVisitLimit));
 
         saveData();
         System.out.println("Ссылка успешно обновлена: " + shortUrl);
     }
 
     /**
-     * Позволяет парсить время действия ссылки в мультиформатном виде для 1h, 1d, 1m.
+     * Удаляет ссылку, если запрос отправил её создатель.
      */
-    private long parseDuration(String input) {
-        long totalMs = 0;
-        String[] parts = input.split(" ");
-        for (String part : parts) {
-            try {
-                if (part.endsWith("d")) {
-                    totalMs += TimeUnit.DAYS.toMillis(Long.parseLong(part.replace("d", "")));
-                } else if (part.endsWith("h")) {
-                    totalMs += TimeUnit.HOURS.toMillis(Long.parseLong(part.replace("h", "")));
-                } else if (part.endsWith("m")) {
-                    totalMs += TimeUnit.MINUTES.toMillis(Long.parseLong(part.replace("m", "")));
-                } else {
-                    System.out.println("Неверный формат времени: " + part + ". Укажите значение, например, 1d 2h 30m.");
-                }
-            } catch (NumberFormatException e) {
-                System.out.println("Ошибка парсинга: " + part);
+    public void deleteUrl(Scanner scanner) {
+        removeExpiredLinks();    // Удаление устаревших ссылок
+        UserData currentUser = getCurrentUser();
+
+        while (true) {
+            System.out.println("Введите короткую ссылку для удаления ('exit' - для перехода в меню):");
+            String shortUrl = scanner.nextLine().trim();
+
+            if ("exit".equalsIgnoreCase(shortUrl)) {
+                System.out.println("Переход в меню.");
+                return;
+            }
+
+            if (currentUser.getLinks().remove(shortUrl) != null) {
+                System.out.println("Ссылка удалена.");
+                saveData();
+                return;
+            } else {
+                System.out.println("Ссылка не существует или вы не являетесь её владельцем.");
             }
         }
-        return totalMs;
-    }
-
-    /**
-     * Удаляет просроченные ссылки с указанием исходной ссылки в сообщении.
-     */
-    public void removeExpiredLinks() {
-        long currentTime = System.currentTimeMillis();
-        users.forEach((username, user) -> {
-            Iterator<Map.Entry<String, LinkData>> iterator = user.getLinks().entrySet().iterator();
-            while (iterator.hasNext()) {
-                Map.Entry<String, LinkData> entry = iterator.next();
-                if (entry.getValue().getExpiryTime() <= currentTime) {
-                    System.out.println("Ссылка " + entry.getKey() + " (" + entry.getValue().getLongUrl() + ") стала недоступна. Пользователь: " + username);
-                    iterator.remove();
-                }
-            }
-        });
-        saveData();
-    }
-
-    /**
-     * Проверяет доступность URL.
-     */
-    public boolean isUrlAccessible(String urlString) {
-        try {
-            URL url = new URL(urlString);
-            HttpURLConnection connection = (HttpURLConnection) url.openConnection();
-            connection.setRequestMethod("HEAD");
-            connection.setConnectTimeout(5000); // Таймаут 5 секунд
-            connection.setReadTimeout(5000);
-            connection.connect();
-
-            int responseCode = connection.getResponseCode();
-            return responseCode >= 200 && responseCode < 400; // Проверка на успешные коды
-        } catch (Exception e) {
-            return false; // Если произошла ошибка, считаем, что URL недоступен
-        }
-    }
-
-    /**
-     * Позволяет получить данные текущего пользователя.
-     */
-    private UserData getCurrentUser() {
-        return users.values().stream()
-                .filter(user -> user.getUuid().equals(currentUserUuid))
-                .findFirst()
-                .orElseThrow(() -> new IllegalStateException("Пользователь не найден!"));
     }
 
     public static void main(String[] args) {
@@ -443,72 +563,20 @@ public class linksShortener {
             String input = scanner.nextLine();
 
             switch (input) {
-                case "1":
-                    shortener.shortenUrl(scanner);
-                    break;
+                case "1" -> shortener.shortenUrl(scanner);
+                case "2" -> shortener.redirect(scanner);
+                case "3" -> shortener.showUserLinks();
+                case "4" -> shortener.editLink(scanner);
+                case "5" -> shortener.deleteUrl(scanner);
 
-                case "2":
-                    shortener.redirect(scanner);
-                    break;
-
-                case "3":
-                    shortener.showUserLinks();
-                    break;
-
-                case "4":
-                    shortener.editLink(scanner);
-                    break;
-
-                case "5":
-                    shortener.deleteUrl(scanner);
-                    break;
-
-                case "6":
+                case "6" -> {
                     System.out.println("Выход из программы. Спасибо за использование!");
                     scanner.close();
                     return;
+                }
 
-                default:
-                    System.out.println("Некорректный выбор. Попробуйте снова.");
+                default -> System.out.println("Некорректный выбор. Попробуйте снова.");
             }
         }
-    }
-}
-
-
-
-class UserData {
-    private final String uuid;
-    private final Map<String, LinkData> links;
-
-    public UserData(String uuid, Map<String, LinkData> links) {
-        this.uuid = uuid;
-        this.links = links;
-    }
-
-    public String getUuid() {
-        return uuid;
-    }
-
-    public Map<String, LinkData> getLinks() {
-        return links;
-    }
-}
-
-class LinkData {
-    private final String longUrl;
-    private final long expiryTime;
-
-    public LinkData(String longUrl, long expiryTime) {
-        this.longUrl = longUrl;
-        this.expiryTime = expiryTime;
-    }
-
-    public String getLongUrl() {
-        return longUrl;
-    }
-
-    public long getExpiryTime() {
-        return expiryTime;
     }
 }

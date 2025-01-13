@@ -2,9 +2,11 @@ package org.example;
 
 import java.awt.*;
 import java.io.*;
-import java.net.HttpURLConnection;
 import java.net.URI;
-import java.net.URL;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
 
@@ -12,17 +14,20 @@ import com.google.gson.Gson;
 import com.google.gson.reflect.TypeToken;
 
 public class linksShortener {
+    // Поля
     private final Map<String, UserData> users = new HashMap<>();
     private final Properties config = new Properties();
+    private final Gson gson = new Gson();
 
+    // Подгружаемые константы
     private String BASE_URL;
     private String DATA_FILE;
     private long MAX_EXPIRY_TIME_MS;
     private int DEFAULT_LIMIT_REDIRECT;
 
-    private final Gson gson = new Gson();
     private String currentUserUuid;
 
+    // Методы для старта работы с программой
     public linksShortener() {
         loadConfig();  // Загрузка конфигурации
         loadData(); // Загрузка данных из файла
@@ -133,6 +138,8 @@ public class linksShortener {
             System.out.println("Данные не найдены, начата новая сессия.");
         } catch (IOException e) {
             System.err.println("Ошибка при загрузке данных: " + e.getMessage());
+        } catch (Exception e) {
+            System.err.println("Некорректный формат данных: " + e.getMessage());
         }
     }
 
@@ -152,17 +159,28 @@ public class linksShortener {
      */
     public boolean isUrlAccessible(String urlString) {
         try {
-            URL url = new URL(urlString);
-            HttpURLConnection connection = (HttpURLConnection) url.openConnection();
-            connection.setRequestMethod("HEAD");
-            connection.setConnectTimeout(5000); // Таймаут 5 секунд
-            connection.setReadTimeout(5000);
-            connection.connect();
+            URI uri = URI.create(urlString);
 
-            int responseCode = connection.getResponseCode();
-            return responseCode >= 200 && responseCode < 400; // Проверка на успешные коды
+            HttpClient client = HttpClient.newBuilder()
+                    .connectTimeout(Duration.ofSeconds(5)) // Таймаут подключения
+                    .build();
+
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(uri)
+                    .method("HEAD", HttpRequest.BodyPublishers.noBody())
+                    .timeout(Duration.ofSeconds(5)) // Таймаут запроса
+                    .build();
+
+            HttpResponse<Void> response = client.send(request, HttpResponse.BodyHandlers.discarding());
+
+            int statusCode = response.statusCode();
+            return statusCode >= 200 && statusCode < 400;
+
+        } catch (IllegalArgumentException e) {
+            System.out.println("Некорректный URL: " + urlString);
+            return false; // Если URI некорректен
         } catch (Exception e) {
-            return false; // Если произошла ошибка, считаем, что URL недоступен
+            return false; // Для любой другой ошибки
         }
     }
 
@@ -171,11 +189,14 @@ public class linksShortener {
      */
     public void removeExpiredLinks() {
         long currentTime = System.currentTimeMillis();
+
         users.forEach((username, user) -> {
             Iterator<Map.Entry<String, LinkData>> iterator = user.getLinks().entrySet().iterator();
+
             while (iterator.hasNext()) {
                 Map.Entry<String, LinkData> entry = iterator.next();
                 LinkData link = entry.getValue();
+
                 if (link.getExpiryTime() <= currentTime) {
                     System.out.println("Срок действия ссылки " + entry.getKey() + " (" + link.getLongUrl() + ") истёк. Пользователь " + username);
                     iterator.remove();
@@ -185,15 +206,17 @@ public class linksShortener {
                 }
             }
         });
+
         saveData();
     }
 
     /**
-     * Позволяет парсить время действия ссылки в мультиформатном виде для 1h, 1d, 1m.
+     * Позволяет парсить время действия ссылки в мультиформатном виде (1h, 1d, 1m и в комбинациях).
      */
     private long parseDuration(String input) {
         long totalMs = 0;
         String[] parts = input.split(" ");
+
         for (String part : parts) {
             try {
                 if (part.endsWith("d")) {
@@ -209,6 +232,7 @@ public class linksShortener {
                 System.out.println("Ошибка парсинга: " + part);
             }
         }
+
         return totalMs;
     }
 
@@ -398,6 +422,10 @@ public class linksShortener {
                     });
         }
     }
+
+    /**
+     * Отображает оставшееся время действия.
+     */
 
     private String formatRemainingTime(long expiryTime) {
         long remainingMs = expiryTime - System.currentTimeMillis();

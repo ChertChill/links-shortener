@@ -13,17 +13,20 @@ import com.google.gson.reflect.TypeToken;
 
 public class linksShortener {
     private final Map<String, UserData> users = new HashMap<>();
-    private final String BASE_URL = "chertchill.ru/";
+    private final Properties config = new Properties();
 
-    private static final String DATA_FILE = "user_data.json";
-    private static final long MAX_EXPIRY_TIME_MS = TimeUnit.DAYS.toMillis(1);   // 24ч по умолчанию
-    private static final int DEFAULT_LIMIT_REDIRECT = 5;
+    private String BASE_URL;
+    private String DATA_FILE;
+    private long MAX_EXPIRY_TIME_MS;
+    private int DEFAULT_LIMIT_REDIRECT;
+
     private final Gson gson = new Gson();
     private String currentUserUuid;
 
     public linksShortener() {
-        loadData(); // Загрузка данных из файла при запуске
-        removeExpiredLinks(); // Удаление устаревших ссылок при запуске
+        loadConfig();  // Загрузка конфигурации
+        loadData(); // Загрузка данных из файла
+        removeExpiredLinks(); // Удаление устаревших ссылок
     }
 
     /**
@@ -87,6 +90,34 @@ public class linksShortener {
                 .filter(user -> user.getUuid().equals(currentUserUuid))
                 .findFirst()
                 .orElseThrow(() -> new IllegalStateException("Пользователь не найден!"));
+    }
+
+    /**
+     * Загружает настройки из файла конфигурации.
+     */
+    private void loadConfig() {
+        try (InputStream input = new FileInputStream("config.properties")) {
+            config.load(input);
+
+            BASE_URL = config.getProperty("base_url", "chertchill.ru/");
+            DATA_FILE = config.getProperty("data_file", "user_data.json");
+            MAX_EXPIRY_TIME_MS = Long.parseLong(config.getProperty("max_expiry_time_ms", String.valueOf(TimeUnit.DAYS.toMillis(1))));
+            DEFAULT_LIMIT_REDIRECT = Integer.parseInt(config.getProperty("default_limit_redirect", "5"));
+
+            System.out.println("==================================================");
+            System.out.println("Конфигурация загружена из config.properties:");
+            System.out.println("Базовый URL - " + BASE_URL);
+            System.out.println("Файл с данными - " + DATA_FILE);
+            System.out.println("Максимальное время действия ссылки - " + formatRemainingTime(System.currentTimeMillis() + MAX_EXPIRY_TIME_MS));
+            System.out.println("Лимит переходов по умолчанию - " + DEFAULT_LIMIT_REDIRECT);
+            System.out.println("==================================================");
+        } catch (IOException e) {
+            System.err.println("Не удалось загрузить конфигурацию. Используются значения по умолчанию.");
+            BASE_URL = "chertchill.ru/";
+            DATA_FILE = "user_data.json";
+            MAX_EXPIRY_TIME_MS = TimeUnit.DAYS.toMillis(1);
+            DEFAULT_LIMIT_REDIRECT = 5;
+        }
     }
 
     /**
@@ -252,7 +283,7 @@ public class linksShortener {
         // Ограничение времени действия до максимального
         if (durationMs > MAX_EXPIRY_TIME_MS) {
             durationMs = MAX_EXPIRY_TIME_MS;
-            System.out.println("Внимание: Максимальное время действия ссылки – " + formatRemainingTime(System.currentTimeMillis() + MAX_EXPIRY_TIME_MS) + " (установлено автоматически).");
+            System.out.println("Указанное время превышает максимальное значение – " + formatRemainingTime(System.currentTimeMillis() + MAX_EXPIRY_TIME_MS) + " (установлено автоматически).");
         }
 
         int visitLimit;
@@ -270,7 +301,7 @@ public class linksShortener {
 
                 // Проверка на лимит по умолчанию
                 if (visitLimit < DEFAULT_LIMIT_REDIRECT) {
-                    System.out.println("Указанный лимит переходов меньше значения по умолчанию - " + DEFAULT_LIMIT_REDIRECT + " (установлено автоматически).");
+                    System.out.println("Указанный лимит переходов меньше значения по умолчанию – " + DEFAULT_LIMIT_REDIRECT + " (установлено автоматически).");
                     visitLimit = DEFAULT_LIMIT_REDIRECT;
                 }
 
@@ -466,7 +497,7 @@ public class linksShortener {
             newExpiryTimeMs = parseDuration(newDurationInput);
             if (newExpiryTimeMs > 0) {
                 if (newExpiryTimeMs > MAX_EXPIRY_TIME_MS) {
-                    System.out.println("Указанное время превышает максимальное значение в " + formatRemainingTime(System.currentTimeMillis() + MAX_EXPIRY_TIME_MS) + " и будет ограничено автоматически.");
+                    System.out.println("Указанное время превышает максимальное значение – " + formatRemainingTime(System.currentTimeMillis() + MAX_EXPIRY_TIME_MS) + " (установлено автоматически).");
                     newExpiryTimeMs = MAX_EXPIRY_TIME_MS;
                 }
                 newExpiryTimeMs += System.currentTimeMillis(); // Установка нового времени истечения
@@ -499,10 +530,13 @@ public class linksShortener {
 
             try {
                 newVisitLimit = Integer.parseInt(newVisitLimitInput);
+
+                // Проверка на лимит по умолчанию
                 if (newVisitLimit < DEFAULT_LIMIT_REDIRECT) {
-                    System.out.println("Указанный лимит переходов меньше значения по умолчанию - " + DEFAULT_LIMIT_REDIRECT + " (установлено автоматически).");
-                    continue;
+                    System.out.println("Указанный лимит переходов меньше значения по умолчанию – " + DEFAULT_LIMIT_REDIRECT + " (установлено автоматически).");
+                    newVisitLimit = DEFAULT_LIMIT_REDIRECT;
                 }
+
                 break;
             } catch (NumberFormatException e) {
                 System.out.println("Некорректное значение. Пожалуйста, введите целое число.");
@@ -541,10 +575,19 @@ public class linksShortener {
         }
     }
 
+    /**
+     * Меняет текущего пользователя.
+     */
+    public void switchUser(Scanner scanner) {
+        System.out.println("Вы собираетесь сменить пользователя. Текущая сессия будет завершена.");
+        authenticate(scanner); // Аутентификация для нового пользователя
+    }
+
     public static void main(String[] args) {
         linksShortener shortener = new linksShortener();
         Scanner scanner = new Scanner(System.in);
 
+        // Аутентификация при запуске
         shortener.authenticate(scanner);
 
         while (true) {
@@ -558,7 +601,8 @@ public class linksShortener {
             3. Показать все созданные ссылки
             4. Редактировать параметры короткой ссылки
             5. Удалить короткую ссылку
-            6. Выйти из программы
+            6. Сменить пользователя
+            7. Выйти из программы
             ==========================================""");
             String input = scanner.nextLine();
 
@@ -568,8 +612,9 @@ public class linksShortener {
                 case "3" -> shortener.showUserLinks();
                 case "4" -> shortener.editLink(scanner);
                 case "5" -> shortener.deleteUrl(scanner);
+                case "6" -> shortener.switchUser(scanner);
 
-                case "6" -> {
+                case "7" -> {
                     System.out.println("Выход из программы. Спасибо за использование!");
                     scanner.close();
                     return;
